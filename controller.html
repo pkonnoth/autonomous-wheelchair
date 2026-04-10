@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wheelchair Motor Controller</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --accent: #2ea043;
+      --danger: #da3633;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: radial-gradient(circle at top, #1f2937, var(--bg));
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }
+    .card {
+      width: min(460px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+    }
+    h1 { margin: 0 0 10px; font-size: 22px; }
+    .status { margin: 0 0 14px; font-size: 14px; color: #9da7b3; }
+    .joystick {
+      width: 220px;
+      height: 220px;
+      margin: 0 auto 16px;
+      border-radius: 50%;
+      border: 2px solid #3d444d;
+      background: #0b0f14;
+      position: relative;
+      touch-action: none;
+    }
+    .knob {
+      width: 70px;
+      height: 70px;
+      border-radius: 50%;
+      background: linear-gradient(#2ea043, #238636);
+      position: absolute;
+      left: 75px;
+      top: 75px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    }
+    .row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .row label { min-width: 86px; }
+    input[type="range"] { width: 100%; }
+    button {
+      border: 1px solid var(--border);
+      color: var(--text);
+      background: #21262d;
+      padding: 10px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      width: 100%;
+    }
+    button:hover { filter: brightness(1.08); }
+    .danger { background: #3b1515; border-color: #7f1d1d; color: #fecaca; }
+    .green { background: #16331e; border-color: #1f6d34; color: #bbf7d0; }
+    .hint { font-size: 13px; color: #9da7b3; margin-top: 8px; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Wheelchair Motor Controller</h1>
+    <p class="status" id="status">Disconnected (ws://localhost:8765)</p>
+
+    <div class="joystick" id="joystick">
+      <div class="knob" id="knob"></div>
+    </div>
+
+    <div class="row">
+      <label for="speed">Max speed</label>
+      <input id="speed" type="range" min="40" max="255" value="255" />
+      <span id="speedValue">255</span>
+    </div>
+
+    <div class="row">
+      <button class="green" id="releaseBtn">Release Brake</button>
+      <button id="engageBtn">Engage Brake</button>
+    </div>
+    <div class="row">
+      <button class="danger" id="stopBtn">Emergency Stop</button>
+    </div>
+
+    <p class="hint">Joystick: full 2D drive (forward/reverse + steering). Keyboard: <span class="kbd">WASD</span> (or arrow keys). <span class="kbd">Space</span> emergency stop.</p>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const joystick = document.getElementById("joystick");
+    const knob = document.getElementById("knob");
+    const speedEl = document.getElementById("speed");
+    const speedValueEl = document.getElementById("speedValue");
+
+    let ws;
+    let dragging = false;
+    let activeSpeed = 0;
+    let joystickLeftSpeed = 0;
+    let joystickRightSpeed = 0;
+    const keyState = {
+      KeyW: false,
+      KeyA: false,
+      KeyS: false,
+      KeyD: false,
+      ArrowUp: false,
+      ArrowLeft: false,
+      ArrowDown: false,
+      ArrowRight: false
+    };
+
+    function connect() {
+      ws = new WebSocket("ws://localhost:8765");
+      ws.onopen = () => { statusEl.textContent = "Connected"; };
+      ws.onclose = () => {
+        statusEl.textContent = "Disconnected (retrying...)";
+        setTimeout(connect, 1000);
+      };
+      ws.onerror = () => { statusEl.textContent = "WebSocket error"; };
+    }
+
+    function send(cmd) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(cmd);
+      }
+    }
+
+    function currentMax() {
+      return Number(speedEl.value);
+    }
+
+    function setKnobPosition(normX, normY) {
+      const center = 110;
+      const limit = 75;
+      const x = center + normX * limit;
+      const y = center - normY * limit;
+      knob.style.left = `${Math.max(35, Math.min(145, x - 35))}px`;
+      knob.style.top = `${Math.max(35, Math.min(145, y - 35))}px`;
+    }
+
+    function speedFromJoystickMix(throttle, steer) {
+      let leftMix = throttle + steer;
+      let rightMix = throttle - steer;
+      const maxMix = Math.max(Math.abs(leftMix), Math.abs(rightMix));
+      if (maxMix > 1) {
+        leftMix /= maxMix;
+        rightMix /= maxMix;
+      }
+
+      const maxSpeed = currentMax();
+      return {
+        leftSpeed: Math.round(leftMix * maxSpeed),
+        rightSpeed: Math.round(rightMix * maxSpeed)
+      };
+    }
+
+    function vectorFromPointer(clientX, clientY) {
+      const rect = joystick.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const rawX = clientX - centerX;
+      const rawY = centerY - clientY;
+      const limit = 75;
+      const mag = Math.hypot(rawX, rawY);
+      const scale = mag > limit ? limit / mag : 1;
+
+      return {
+        normX: (rawX * scale) / limit,
+        normY: (rawY * scale) / limit
+      };
+    }
+
+    function sendTank(leftSpeed, rightSpeed) {
+      if (leftSpeed === 0 && rightSpeed === 0) {
+        send("S");
+        return;
+      }
+      send("B,1");
+      send(`X,${leftSpeed},${rightSpeed}`);
+    }
+
+    function computeTankFromKeys() {
+      const forward = keyState.KeyW || keyState.ArrowUp;
+      const reverse = keyState.KeyS || keyState.ArrowDown;
+      const left = keyState.KeyA || keyState.ArrowLeft;
+      const right = keyState.KeyD || keyState.ArrowRight;
+
+      const throttle = (forward ? 1 : 0) + (reverse ? -1 : 0);
+      const steer = (right ? 1 : 0) + (left ? -1 : 0);
+
+      if (throttle === 0 && steer === 0) {
+        return { leftSpeed: 0, rightSpeed: 0 };
+      }
+
+      let leftMix = throttle + steer;
+      let rightMix = throttle - steer;
+      const maxMix = Math.max(Math.abs(leftMix), Math.abs(rightMix));
+      if (maxMix > 1) {
+        leftMix /= maxMix;
+        rightMix /= maxMix;
+      }
+
+      const maxSpeed = currentMax();
+      return {
+        leftSpeed: Math.round(leftMix * maxSpeed),
+        rightSpeed: Math.round(rightMix * maxSpeed)
+      };
+    }
+
+    function onPointerDown(e) {
+      dragging = true;
+      joystick.setPointerCapture(e.pointerId);
+      onPointerMove(e);
+    }
+
+    function onPointerMove(e) {
+      if (!dragging) return;
+      const { normX, normY } = vectorFromPointer(e.clientX, e.clientY);
+      const { leftSpeed, rightSpeed } = speedFromJoystickMix(normY, normX);
+
+      activeSpeed = Math.round((leftSpeed + rightSpeed) / 2);
+      joystickLeftSpeed = leftSpeed;
+      joystickRightSpeed = rightSpeed;
+
+      setKnobPosition(normX, normY);
+      sendTank(leftSpeed, rightSpeed);
+    }
+
+    function onPointerUp() {
+      dragging = false;
+      activeSpeed = 0;
+      joystickLeftSpeed = 0;
+      joystickRightSpeed = 0;
+      setKnobPosition(0, 0);
+      send("S");
+    }
+
+    joystick.addEventListener("pointerdown", onPointerDown);
+    joystick.addEventListener("pointermove", onPointerMove);
+    joystick.addEventListener("pointerup", onPointerUp);
+    joystick.addEventListener("pointercancel", onPointerUp);
+
+    speedEl.addEventListener("input", () => {
+      speedValueEl.textContent = speedEl.value;
+      if (!dragging) {
+        const norm = activeSpeed / currentMax();
+        setKnobPosition(0, norm);
+      }
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) {
+        e.preventDefault();
+      }
+
+      if (e.code === "Space") {
+        Object.keys(keyState).forEach((k) => { keyState[k] = false; });
+        send("S");
+        setKnobPosition(0, 0);
+        return;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(keyState, e.code)) {
+        keyState[e.code] = true;
+      }
+    });
+
+    document.addEventListener("keyup", (e) => {
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) {
+        e.preventDefault();
+      }
+
+      if (Object.prototype.hasOwnProperty.call(keyState, e.code)) {
+        keyState[e.code] = false;
+      }
+    });
+
+    document.getElementById("releaseBtn").addEventListener("click", () => send("B,1"));
+    document.getElementById("engageBtn").addEventListener("click", () => send("B,0"));
+    document.getElementById("stopBtn").addEventListener("click", () => {
+      Object.keys(keyState).forEach((k) => { keyState[k] = false; });
+      activeSpeed = 0;
+      joystickLeftSpeed = 0;
+      joystickRightSpeed = 0;
+      setKnobPosition(0, 0);
+      send("S");
+      send("B,0");
+    });
+
+    setInterval(() => {
+      if (dragging) {
+        sendTank(joystickLeftSpeed, joystickRightSpeed);
+        return;
+      }
+
+      const { leftSpeed, rightSpeed } = computeTankFromKeys();
+      if (leftSpeed !== 0 || rightSpeed !== 0) {
+        sendTank(leftSpeed, rightSpeed);
+        setKnobPosition(0, Math.round((leftSpeed + rightSpeed) / 2) / currentMax());
+      } else {
+        send("S");
+        setKnobPosition(0, 0);
+      }
+    }, 80);
+
+    setKnobPosition(0, 0);
+    connect();
+  </script>
+</body>
+</html>
