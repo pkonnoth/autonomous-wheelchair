@@ -1,0 +1,25 @@
+
+services:
+  ros2_humble:
+    image: dustynv/ros:humble-desktop-l4t-r36.4.0
+    runtime: nvidia
+    container_name: ros2_aurora
+    network_mode: host
+    stdin_open: true
+    tty: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=0
+      - LD_LIBRARY_PATH=/ros2_ws/src/aurora_ros/src/aurora_remote_public/lib/linux_aarch64
+    volumes:
+      - ~/ros2_ws:/ros2_ws
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+        # devices:
+      # - /dev/video0:/dev/video0  # camera passthrough if needed
+    command: >
+      bash -c "
+        source /opt/ros/humble/install/setup.bash &&
+        source /ros2_ws/install/setup.bash 2>/dev/null || true &&
+        echo 'ROS2 Humble ready. Run: ros2 launch slamware_ros_sdk slamware_ros_sdk_server_and_view.xml ip_address:=<AURORA_IP>' &&
+        bash
+      "
